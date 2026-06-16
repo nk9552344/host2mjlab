@@ -7,6 +7,11 @@
 7. g1_host_agent_cfg.py
 
 
+https://github.com/InternRobotics/HoST
+https://taohuang13.github.io/humanoid-standingup.github.io/assets/paper.pdf
+
+
+
 Good. Now we can talk about an actual porting plan instead of a conceptual one.
 
 The first thing to understand is:
