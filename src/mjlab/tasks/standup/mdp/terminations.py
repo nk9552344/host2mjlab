@@ -166,6 +166,7 @@ class stuck_no_progress:
     env: ManagerBasedRlEnv,
     patience_s: float,
     min_improvement: float = 0.01,
+    min_standing_height: float = 0.0,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
   ) -> torch.Tensor:
     asset: Entity = env.scene[asset_cfg.name]
@@ -179,7 +180,12 @@ class stuck_no_progress:
       self._stall_time + self._step_dt,
     )
 
-    return self._stall_time > patience_s
+    stuck = self._stall_time > patience_s
+    # Don't terminate an env that has already reached standing height --
+    # holding still at full stand is success, not stalling. Only fire when
+    # the robot is below standing height and making no upward progress.
+    already_standing = height >= min_standing_height
+    return stuck & ~already_standing
 
   def reset(self, env_ids: torch.Tensor) -> None:
     self._best_height[env_ids] = float("-inf")

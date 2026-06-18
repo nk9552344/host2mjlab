@@ -265,7 +265,7 @@ def make_standup_env_cfg() -> ManagerBasedRlEnvCfg:
     "push_robot": EventTermCfg(
       func=mdp.push_by_setting_velocity,
       mode="interval",
-      interval_range_s=(1.0, 3.0),
+      interval_range_s=(8.0, 15.0),  # was (1.0, 3.0); give the robot time to stand before being pushed again
       params={
         # Unchanged from locomotion -- already exactly the "someone pushed
         # the robot while standing up" mechanism. fall_difficulty widens
@@ -321,10 +321,15 @@ def make_standup_env_cfg() -> ManagerBasedRlEnvCfg:
   rewards = {
     "standup_progress": RewardTermCfg(
       func=mdp.standup_progress,
-      weight=3.0,
+      weight=5.0,
       params={
+        # Must be set per-robot to the robot's actual full standing height
+        # (e.g. pelvis z from the MJCF), NOT to MIN_STANDING_HEIGHT. Using
+        # MIN_STANDING_HEIGHT here saturates height_progress at the crouch
+        # threshold and removes all gradient toward a full upright stand.
+        # Override in your robot-specific cfg.
         "target_height": MIN_STANDING_HEIGHT,
-        "height_weight": 1.0,
+        "height_weight": 2.0,
         "uprightness_weight": 1.0,
       },
     ),
@@ -339,7 +344,7 @@ def make_standup_env_cfg() -> ManagerBasedRlEnvCfg:
     ),
     "upright": RewardTermCfg(
       func=mdp.upright,
-      weight=1.0,
+      weight=2.0,
       params={
         "std": math.sqrt(0.2),
         "asset_cfg": SceneEntityCfg("robot", body_names=()),  # Set per-robot.
@@ -396,8 +401,11 @@ def make_standup_env_cfg() -> ManagerBasedRlEnvCfg:
     "stuck_no_progress": TerminationTermCfg(
       func=mdp.stuck_no_progress,
       params={
-        "patience_s": 5.0,  # Tune: how long without height improvement
+        "patience_s": 10.0,  # Tune: how long without height improvement
         "min_improvement": 0.01,  # before giving up on this attempt.
+        # Gate: don't terminate an env already at standing height.
+        # Set per-robot to match min_standing_height used elsewhere.
+        "min_standing_height": MIN_STANDING_HEIGHT,
       },
     ),
     "out_of_terrain_bounds": TerminationTermCfg(
@@ -436,14 +444,14 @@ def make_standup_env_cfg() -> ManagerBasedRlEnvCfg:
             "push_torque_range": None,
           },
           {
-            "step": 5000 * 24,
+            "step": 8000 * 24,  # was 5000 -- give near_upright stage more time to converge
             "orientation_mode": "side",
             "velocity_range": {"x": (-1.0, 1.0), "y": (-1.0, 1.0)},
             "push_force_range": None,
             "push_torque_range": None,
           },
           {
-            "step": 10000 * 24,
+            "step": 16000 * 24,  # was 10000 -- give side-fall stage more time to converge
             "orientation_mode": "any",
             "velocity_range": {
               "x": (-2.0, 2.0),

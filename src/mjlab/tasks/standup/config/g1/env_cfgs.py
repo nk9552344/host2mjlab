@@ -58,6 +58,19 @@ from mjlab.sensor import (
 from mjlab.tasks.standup.mdp.standup_command import StandStillCommandCfg
 from mjlab.tasks.standup.standup_env_cfg import make_standup_env_cfg
 
+# G1 pelvis standing height from g1.xml:
+#   <body name="pelvis" pos="0 0 0.793" ...>
+# standup_progress.target_height must be the FULL standing height so that
+# height_progress has gradient all the way to a complete upright stand.
+# Using MIN_STANDING_HEIGHT (0.5) saturates height_progress at a crouch and
+# removes the signal that drives the robot past 50 cm.
+_G1_PELVIS_STANDING_HEIGHT: float = 0.793
+# Minimum height to be considered "standing" (~82 % of full standing height).
+# Used to gate hold_still / variable_posture rewards and the terrain
+# curriculum success check so they only fire once the robot is actually up,
+# not just crouching.
+_G1_MIN_STANDING_HEIGHT: float = 0.65
+
 
 def unitree_g1_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   """Create Unitree G1 rough terrain Standup configuration."""
@@ -129,6 +142,9 @@ def unitree_g1_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   stand_still_cmd = cfg.commands["stand_still"]
   assert isinstance(stand_still_cmd, StandStillCommandCfg)
   stand_still_cmd.viz.z_offset = 1.15
+  # Gate tracking-error metric to G1 standing height so it doesn't penalize
+  # the velocity incurred while getting up.
+  stand_still_cmd.min_standing_height = _G1_MIN_STANDING_HEIGHT
 
   cfg.events["foot_friction"].params["asset_cfg"].geom_names = geom_names
   cfg.events["base_com"].params["asset_cfg"].body_names = ("torso_link",)
@@ -175,6 +191,15 @@ def unitree_g1_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 
   cfg.rewards["body_ang_vel"].weight = -0.05
   cfg.rewards["angular_momentum"].weight = -0.02
+
+  # G1 standing height overrides -- these must all use the same definition
+  # of "standing" so hold_still, pose, curriculum, and termination are
+  # consistent. target_height drives the gradient all the way to full stand.
+  cfg.rewards["standup_progress"].params["target_height"] = _G1_PELVIS_STANDING_HEIGHT
+  cfg.rewards["hold_still"].params["min_standing_height"] = _G1_MIN_STANDING_HEIGHT
+  cfg.rewards["pose"].params["min_standing_height"] = _G1_MIN_STANDING_HEIGHT
+  cfg.curriculum["terrain_levels"].params["min_standing_height"] = _G1_MIN_STANDING_HEIGHT
+  cfg.terminations["stuck_no_progress"].params["min_standing_height"] = _G1_MIN_STANDING_HEIGHT
 
   # Wire the generic self_collision placeholder (defined in
   # standup_env_cfg.py) to this robot's actual sensor name and a stronger
