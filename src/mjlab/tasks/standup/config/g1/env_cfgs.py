@@ -43,6 +43,7 @@ from mjlab.asset_zoo.robots import (
   G1_ACTION_SCALE,
   get_g1_robot_cfg,
 )
+from mjlab.asset_zoo.robots.unitree_g1.g1_constants import HOME_KEYFRAME
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs import mdp as envs_mdp
 from mjlab.envs.mdp.actions import JointPositionActionCfg
@@ -80,7 +81,27 @@ def unitree_g1_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   cfg.sim.contact_sensor_maxmatch = 500
   cfg.sim.nconmax = 70
 
-  cfg.scene.entities = {"robot": get_g1_robot_cfg()}
+  # Use HOME_KEYFRAME as the robot's default joint state instead of the
+  # KNEES_BENT_KEYFRAME that get_g1_robot_cfg() returns by default.
+  #
+  # ROOT CAUSE of the balance failure: KNEES_BENT (hip_pitch=-0.312,
+  # knee=0.669, ankle=-0.363) is a forward-leaning crouch. The
+  # gravitational torque at the ankle is roughly 20 N*m (20 kg body
+  # * 9.8 * 0.1 m forward CoM offset). The ankle PD stiffness is only
+  # ~10.5 N*m/rad (STIFFNESS_5020 * 2 = 2 * 5.25). To resist 20 N*m the
+  # ankle would need to deflect 20/10.5 = 1.9 rad from its target --
+  # well past the joint limit -- so the robot falls in the first few sim
+  # steps before any policy gradient exists, and spends ~95% of every
+  # episode lying at ~50 degrees from vertical.
+  #
+  # HOME_KEYFRAME (hip_pitch=-0.1, knee=0.3, ankle=-0.2) is a near-upright
+  # stance where the gravitational torque at the ankle is ~2 N*m, well
+  # within the stiffness range. The robot can hold this pose with the PD
+  # controller and gives the policy a standing robot to actually learn
+  # balance from, not a robot that is already on the floor at step 1.
+  _robot_cfg = get_g1_robot_cfg()
+  _robot_cfg.init_state = HOME_KEYFRAME
+  cfg.scene.entities = {"robot": _robot_cfg}
 
   # Set raycast sensor frame to G1 pelvis.
   for sensor in cfg.scene.sensors or ():
@@ -209,6 +230,17 @@ def unitree_g1_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 
   cfg.rewards["upright"].params["asset_cfg"].body_names = ("torso_link",)
   cfg.rewards["body_ang_vel"].params["asset_cfg"].body_names = ("torso_link",)
+
+  # TIGHTEN UPRIGHT GRADIENT. Default std=sqrt(0.2)=0.447 makes
+  # exp(-xy^2/std^2) nearly flat for small tilts: at 10 degrees off
+  # vertical xy^2=0.030, reward=exp(-0.030/0.2)=0.86 -- barely different
+  # from the perfect-upright reward of 1.0. The policy receives almost no
+  # signal that it is tilting until it is already far from vertical and
+  # near the floor. std=sqrt(0.05)=0.224 sharpens the curve so that at
+  # 10 degrees xy^2=0.030, reward=exp(-0.030/0.05)=0.55 -- a clear,
+  # actionable gradient that pulls the policy back toward vertical before
+  # the robot has toppled.
+  cfg.rewards["upright"].params["std"] = 0.05 ** 0.5
 
   # REWARD REBALANCING. The previous setup had standup_progress (weight
   # 5.0, max ~15/step) dominating pose (weight 1.0, max 1/step) and
