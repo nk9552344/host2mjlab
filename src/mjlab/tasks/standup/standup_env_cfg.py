@@ -327,6 +327,16 @@ def make_standup_env_cfg() -> ManagerBasedRlEnvCfg:
         "asset_cfg": SceneEntityCfg("robot", body_names=()),  # Set per-robot.
       },
     ),
+    "upright_gated": RewardTermCfg(
+      func=mdp.upright_with_feet_gate,
+      weight=0.0,  # Override per-robot; requires feet contact sensor to be wired.
+      params={
+        "std": math.sqrt(0.2),  # Override per-robot.
+        "sensor_name": "",  # Set per-robot: name of the feet ground contact sensor.
+        "bodyweight_n": 200.0,  # Override per-robot (~robot_mass × 9.8 in N).
+        "asset_cfg": SceneEntityCfg("robot", body_names=()),  # Set per-robot.
+      },
+    ),
     "pose": RewardTermCfg(
       func=mdp.variable_posture,
       weight=1.0,
@@ -349,6 +359,14 @@ def make_standup_env_cfg() -> ManagerBasedRlEnvCfg:
       params={
         "sensor_name": "robot/root_angmom",
         "std": 1.0,  # Override per-robot.
+      },
+    ),
+    "feet_bearing_weight": RewardTermCfg(
+      func=mdp.feet_bearing_weight,
+      weight=0.0,  # Override per-robot; requires feet contact sensor to be wired.
+      params={
+        "sensor_name": "",  # Set per-robot: name of the feet ground contact sensor.
+        "bodyweight_n": 200.0,  # Override per-robot (~robot_mass × 9.8 in N).
       },
     ),
     "dof_pos_limits": RewardTermCfg(func=mdp.joint_pos_limits, weight=-0.05),

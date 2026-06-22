@@ -176,43 +176,51 @@ def unitree_g1_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   cfg.events["foot_friction"].params["asset_cfg"].geom_names = geom_names
   cfg.events["base_com"].params["asset_cfg"].body_names = ("torso_link",)
 
-  # Single std band: stay-stand has only one operating regime (always
-  # upright), so the two-band std_recovering/std_standing design collapses
-  # to a single std_values dict. 0.25 is loose enough for the policy to
-  # receive a useful per-step signal while still rewarding tight default-pose
-  # tracking once converged.
+  # POSE STD UNIFORM: Tight std=0.25 for all joints stabilises early training
+  # by keeping the policy near HOME before the value function converges.
+  # The gated upright reward (upright_gated) provides a stronger gradient for
+  # corrective leg movements than any pose std relaxation could, because the
+  # gate turns off the entire 10-unit upright signal when feet leave the ground
+  # -- this overwhelms the 2-unit pose gradient opposing leg corrections.
+  # Loose leg std (tried previously) removed the stabilising pose gradient
+  # for legs, causing random policy perturbations to destabilise the robot
+  # immediately (fell_over=1.0 from iter 0).
   cfg.rewards["pose"].params["std_values"] = {".*": 0.25}
 
   cfg.rewards["upright"].params["asset_cfg"].body_names = ("torso_link",)
   cfg.rewards["body_ang_vel"].params["asset_cfg"].body_names = ("torso_link",)
 
-  # UPRIGHT STD -- calibrated to the robot's OPERATING TILT RANGE, not to
-  # the ideal "near-perfect" range. The gradient the policy receives is
-  # proportional to w * kernel / std², where kernel = exp(-xy²/std²).
-  # If std is too tight, the kernel is near-zero at the robot's actual
-  # operating tilt, killing the gradient exactly when the policy needs it
-  # most. Evidence: at std=sqrt(0.05)=0.224, a 20° tilt gives
-  # kernel=exp(-0.117/0.05)=0.096 and gradient-factor=5*0.096/0.05=9.6.
-  # At std=sqrt(0.117)=0.342 (calibrated to 20°: sin²(20°)=0.117),
-  # the same 20° tilt gives kernel=exp(-1)=0.368 and gradient-factor
-  # =10*0.368/0.117=31.4 -- 3.3× stronger signal right where the robot
-  # operates, making corrective actions actually learnable.
-  #
-  # The previous comment here (claiming tighter std gives "more actionable
-  # gradient") was wrong: the exp gradient is proportional to KERNEL, so
-  # a tight std that drives the kernel to ~0 at operating tilts produces
-  # WEAKER, not stronger, gradients for the policy to learn from.
-  cfg.rewards["upright"].params["std"] = 0.117 ** 0.5  # sin²(20°)=0.117
+  # UPRIGHT STD calibrated to the robot's 20° operating tilt. See the long
+  # comment in the session 3 notes for the gradient analysis. std=sqrt(0.117)
+  # gives exp(-1)=0.37 kernel at 20° vs exp(-2.3)≈0.1 with old std=sqrt(0.05).
+  # Applied to BOTH upright (weight 0, kept for reference) and upright_gated.
+  _upright_std = 0.117 ** 0.5  # sin²(20°) = 0.117
+  cfg.rewards["upright"].params["std"] = _upright_std
+  cfg.rewards["upright"].weight = 0.0  # Replaced by upright_gated below.
 
-  # Reward balance (per-step weighted max, in default-pose standing state):
-  #   upright:    10.0 -- PRIMARY signal; must dominate for balance to be learned
-  #   pose:        2.0 -- SECONDARY regularization toward default joint config
-  #   hold_still:  2.0 -- low-velocity penalty
-  # Total max per step ~14. upright must outweigh pose so the policy learns
-  # to prioritize staying vertical over returning to default joint positions.
-  # Inverted weights (pose=10, upright=5) caused the policy to learn pose-
-  # tracking actions that actively destabilized balance (confirmed in training).
-  cfg.rewards["upright"].weight = 10.0
+  # UPRIGHT GATED BY FEET CONTACT: the primary balance signal (weight 10).
+  # Returns upright_score × feet_gate where:
+  #   upright_score = exp(-xy²/std²) \u2208 [0, 1] -- torso uprightness
+  #   feet_gate     = clamp(foot_force / bodyweight, 0, 1) \u2208 [0, 1]
+  #
+  # The gate makes it IMPOSSIBLE to earn the primary reward without bearing
+  # weight through the legs:
+  #   arm-only balance: feet leave ground → gate=0 → reward=0
+  #   proper balance:   feet bear weight  → gate=1 → reward=upright_score
+  # This directly prevents the "arm-only" local optimum that emerged at
+  # ~1500 iterations in previous runs.
+  cfg.rewards["upright_gated"].params["asset_cfg"].body_names = ("torso_link",)
+  cfg.rewards["upright_gated"].params["std"] = _upright_std
+  cfg.rewards["upright_gated"].params["sensor_name"] = feet_ground_cfg.name
+  cfg.rewards["upright_gated"].params["bodyweight_n"] = 225.0  # ~23 kg × 9.8 N
+  cfg.rewards["upright_gated"].weight = 10.0
+
+  # Reward balance (per-step max when perfectly standing with feet down):
+  #   upright_gated: 10.0 × 1.0 × 1.0 = 10.0  (PRIMARY - requires legs)
+  #   feet_bearing:   5.0 × 0.76     =  3.8  (secondary - saturates at tanh(1))
+  #   pose:           2.0 × 1.0      =  2.0  (regularization)
+  #   hold_still:     2.0 × ~0.5     = ~1.0  (small base velocity while balancing)
+  #   Total max per step ≈ 16.8
   cfg.rewards["pose"].weight = 2.0
 
   # body_ang_vel and angular_momentum now use bounded exp(-x²/std²) kernels
@@ -247,6 +255,17 @@ def unitree_g1_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   cfg.rewards["self_collision"].params["sensor_name"] = self_collision_cfg.name
   cfg.rewards["self_collision"].params["force_threshold"] = 10.0
   cfg.rewards["self_collision"].weight = -0.2
+
+  # FEET BEARING WEIGHT: reward ground-reaction force through feet.
+  # When both feet are properly planted, total force ≈ bodyweight (225 N for
+  # G1 ~23 kg), giving tanh(1) ≈ 0.76 per step × weight=5 ≈ 3.8.
+  # When the robot abandons legs for arm-only balance, foot forces drop to 0
+  # and this reward collapses, directly opposing that failure mode.
+  # The feet_ground_contact sensor exposes two primaries (left and right
+  # ankle subtrees) with reduce="netforce", so data.force is [B, 2, 3].
+  cfg.rewards["feet_bearing_weight"].params["sensor_name"] = feet_ground_cfg.name
+  cfg.rewards["feet_bearing_weight"].params["bodyweight_n"] = 225.0  # ~23 kg × 9.8
+  cfg.rewards["feet_bearing_weight"].weight = 5.0
 
   # air_time, foot_clearance, foot_slip overrides removed: these reward
   # terms don't exist in standup_env_cfg.py (dropped upstream as gait-cycle-

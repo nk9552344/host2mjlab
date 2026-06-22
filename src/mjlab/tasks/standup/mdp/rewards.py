@@ -265,6 +265,103 @@ def angular_momentum_penalty(
   return torch.exp(-angmom_magnitude_sq / std**2)
 
 
+def feet_bearing_weight(
+  env: ManagerBasedRlEnv,
+  sensor_name: str,
+  bodyweight_n: float = 225.0,
+) -> torch.Tensor:
+  """Reward feet bearing the robot's weight through ground contact.
+
+  Reads the net ground-reaction force from a ContactSensor configured with
+  reduce="netforce" and two primaries (left and right foot subtrees). Returns
+  tanh((|F_left| + |F_right|) / bodyweight_n), which is:
+    - 0.0  when no foot touches the ground (legs fully abandoned)
+    - ~0.46 when only one foot bears bodyweight
+    - ~0.76 when both feet together bear full bodyweight
+
+  This directly incentivizes leg use: the robot must push through its legs
+  to generate ground reaction force. When the policy learns to balance using
+  only the upper body (the "arm-flapping" failure mode), foot forces drop to
+  zero and this reward collapses, opposing that local optimum.
+
+  The sensor must expose a ``force`` field with shape [B, 2, 3] (one net
+  force vector per foot, in world frame). For G1 with two primaries
+  (left_ankle_roll_link, right_ankle_roll_link) and reduce="netforce" this
+  is satisfied out-of-the-box.
+
+  bodyweight_n: normalisation constant in Newtons. Set to robot_mass * 9.8.
+    For G1 (~23 kg): 225 N. tanh saturates near 1.0 at 2× bodyweight.
+  """
+  sensor: ContactSensor = env.scene[sensor_name]
+  data = sensor.data
+  assert data.force is not None, (
+    "feet_bearing_weight requires the contact sensor to have fields=('force', ...)"
+  )
+  # data.force: [B, 2, 3] — left foot at index 0, right foot at index 1.
+  force_left = torch.norm(data.force[:, 0, :], dim=-1)   # [B]
+  force_right = torch.norm(data.force[:, 1, :], dim=-1)  # [B]
+  total_force = force_left + force_right                  # [B]
+  return torch.tanh(total_force / bodyweight_n)
+
+
+def upright_with_feet_gate(
+  env: ManagerBasedRlEnv,
+  std: float,
+  sensor_name: str,
+  bodyweight_n: float = 225.0,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+  """Upright reward gated by ground-reaction force — the primary balance signal.
+
+  Returns upright_score × feet_gate where:
+    upright_score = exp(-xy²/std²) ∈ [0, 1]   (1.0 when perfectly vertical)
+    feet_gate     = clamp(force / bodyweight_n, 0, 1) ∈ [0, 1]
+                    (1.0 when both feet bear full bodyweight, 0.0 when airborne)
+
+  The gate makes it IMPOSSIBLE to earn the primary balance reward without
+  bearing weight through the feet. This prevents the "arm-only balance"
+  failure mode (~1500 iters) where the policy earns full upright reward by
+  flapping arms while freezing legs, because:
+    - arm-only balance:  feet leave ground → gate → 0 → reward → 0
+    - proper balance:    feet bear weight  → gate → 1 → reward = upright_score
+
+  The feet_gate uses a linear clamp (not tanh) so it reaches exactly 1.0 at
+  bodyweight_n Newtons total force, giving a clear full-reward target for the
+  policy to aim at.
+
+  asset_cfg: body_names=("torso_link",) for G1 to track the torso quaternion.
+    Set per-robot.
+  sensor_name: ContactSensor with reduce="netforce" and two primaries (left
+    and right foot subtrees). data.force shape must be [B, 2, 3].
+  bodyweight_n: Normalisation constant in Newtons (robot_mass × 9.8).
+    Gate = 1.0 at this force. For G1 (~23 kg): 225 N.
+  """
+  # --- Uprightness component ---
+  asset: Entity = env.scene[asset_cfg.name]
+  if asset_cfg.body_ids:
+    body_quat_w = asset.data.body_link_quat_w[:, asset_cfg.body_ids, :]  # [B, 1, 4]
+    body_quat_w = body_quat_w.squeeze(1)  # [B, 4]
+  else:
+    body_quat_w = asset.data.root_link_quat_w  # [B, 4]
+  gravity_w = asset.data.gravity_vec_w  # [3]
+  projected_gravity_b = quat_apply_inverse(body_quat_w, gravity_w)  # [B, 3]
+  xy_sq = torch.sum(torch.square(projected_gravity_b[:, :2]), dim=1)  # [B]
+  upright_score = torch.exp(-xy_sq / std**2)  # [B], in [0, 1]
+
+  # --- Foot-contact gate ---
+  sensor: ContactSensor = env.scene[sensor_name]
+  data = sensor.data
+  assert data.force is not None, (
+    "upright_with_feet_gate requires the contact sensor to have fields=('force', ...)"
+  )
+  # data.force: [B, 2, 3] — left foot at index 0, right foot at index 1.
+  force_left = torch.norm(data.force[:, 0, :], dim=-1)   # [B]
+  force_right = torch.norm(data.force[:, 1, :], dim=-1)  # [B]
+  feet_gate = torch.clamp((force_left + force_right) / bodyweight_n, 0.0, 1.0)  # [B]
+
+  return upright_score * feet_gate
+
+
 class variable_posture:
   """Penalize deviation from default pose.
 
