@@ -6,6 +6,11 @@ python -m mjlab.scripts.train Mjlab-Standup-Flat-Unitree-G1 --gpu-ids None
   --checkpoint-file logs/rsl_rl/g1_staystand/2026-06-21_21-58-46/model_4000.pt \ 
   --num-envs 2
 
+uv run train Mjlab-StayStand-Unitree-G1 --gpu-ids None
+
+uv run play Mjlab-StayStand-Unitree-G1 --checkpoint-file logs/rsl_rl/g1_stay_stand/2026-06-22_23-04-28/model_550.pt --num-envs 2
+
+
 https://github.com/InternRobotics/HoST
 
 https://wandb.ai/nk9552344-infosys/mjlab/runs/rawno0s9?nw=nwusernk9552344
