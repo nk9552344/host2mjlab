@@ -240,31 +240,35 @@ def body_angular_velocity_penalty(
 ) -> torch.Tensor:
   """Penalize excessive body angular velocities with a bounded exp kernel.
 
-  In the recovery policy this used raw squared magnitude and was disabled
-  (weight=0) because tumbling produced angular velocities of ~50-100 rad/s,
-  making the penalty -250 to -1000 per step and destabilising the value
-  function. In stay-stand there is no tumbling phase, so we can re-enable
-  it. However, we still use exp(-x²/std²) rather than raw squared magnitude:
-    - Bounded in [0, 1] -- the penalty can never blow up the value function
-      no matter how chaotic the state after a hard push.
-    - Still provides a strong gradient near zero (small angular velocities
-      near std matter just as much as large ones).
+  Returns penalty intensity in [0, 1]: 0 at rest and saturating to 1 at high
+  angular velocity, computed as ``1 - exp(-xy²/std²)``. Combined with the
+  negative weight in env cfg, this gives a real penalty that grows with
+  motion and is bounded so it can't blow up the value function.
+
+  HISTORY: the previous implementation returned ``exp(-xy²/std²)`` (highest
+  at zero, lowest at chaos). Combined with a negative weight, that
+  *rewarded* high angular velocity (cost was largest when still, zero when
+  spinning), which actively trained the torso-swinging balance strategy
+  this term was meant to suppress. Every other ``exp(-x²/std²)`` reward in
+  this file (upright, pose, hold_still, base_height, upright_gated) uses a
+  positive weight because that kernel shape is a stability *reward*, not a
+  penalty. Fixed by flipping the kernel here and in angular_momentum_penalty.
 
   Only roll and pitch (xy) are penalized; yaw rotation is a separate concern
   (the robot should be able to yaw to settle, and yaw angular velocity alone
   doesn't indicate instability the same way pitch/roll does).
 
-  std: characteristic angular velocity (rad/s) at which the reward falls to
-  exp(-1) ≈ 0.37. A value of ~1.0 rad/s is a reasonable starting point --
-  tighter than walking gait but loose enough not to penalize normal balance
-  corrections.
+  std: characteristic angular velocity (rad/s) at which the penalty reaches
+  ``1 - exp(-1) ≈ 0.63``. A value of ~1.0 rad/s is a reasonable starting
+  point -- tighter than walking gait but loose enough not to fully saturate
+  the penalty during normal balance corrections (which run at ~0.2-0.4 rad/s).
   """
   asset: Entity = env.scene[asset_cfg.name]
   ang_vel = asset.data.body_link_ang_vel_w[:, asset_cfg.body_ids, :]
   ang_vel = ang_vel.squeeze(1)
   ang_vel_xy = ang_vel[:, :2]  # Roll + pitch only.
   xy_sq = torch.sum(torch.square(ang_vel_xy), dim=1)
-  return torch.exp(-xy_sq / std**2)
+  return 1.0 - torch.exp(-xy_sq / std**2)
 
 
 def angular_momentum_penalty(
@@ -274,22 +278,26 @@ def angular_momentum_penalty(
 ) -> torch.Tensor:
   """Penalize whole-body angular momentum with a bounded exp kernel.
 
-  Same reasoning as body_angular_velocity_penalty: was disabled in recovery
-  because tumbling/flailing produced magnitudes that blew up the value
-  function. Now re-enabled with exp(-|L|²/std²) so the penalty is bounded
-  in [0, 1] regardless of what the policy does after a hard push.
+  Returns penalty intensity in [0, 1] computed as ``1 - exp(-|L|²/std²)``: 0
+  at rest and saturating to 1 at high angular momentum. Combined with the
+  negative weight in env cfg this is a bounded, correctly-oriented penalty.
 
-  std: characteristic angular momentum magnitude at which reward falls to
-  exp(-1) ≈ 0.37. Units depend on your robot's inertia tensor; start with
-  std ~1.0 and adjust based on typical standing angular momentum logged
-  during early training.
+  HISTORY: see body_angular_velocity_penalty -- the previous form
+  ``exp(-|L|²/std²)`` was used with a negative weight, which inverted the
+  intended cost (rewarding chaos, penalising stillness). Flipped to
+  ``1 - exp(...)`` so the function name and semantics match.
+
+  std: characteristic angular momentum magnitude at which the penalty
+  reaches ``1 - exp(-1) ≈ 0.63``. Units depend on the robot's inertia
+  tensor; start with std ~1.0 and adjust based on the
+  ``Metrics/angular_momentum_mean`` log during early training.
   """
   angmom_sensor: BuiltinSensor = env.scene[sensor_name]
   angmom = angmom_sensor.data
   angmom_magnitude_sq = torch.sum(torch.square(angmom), dim=-1)
   angmom_magnitude = torch.sqrt(angmom_magnitude_sq)
   env.extras["log"]["Metrics/angular_momentum_mean"] = torch.mean(angmom_magnitude)
-  return torch.exp(-angmom_magnitude_sq / std**2)
+  return 1.0 - torch.exp(-angmom_magnitude_sq / std**2)
 
 
 def feet_bearing_weight(

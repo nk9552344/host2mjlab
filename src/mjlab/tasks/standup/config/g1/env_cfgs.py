@@ -256,31 +256,37 @@ def unitree_g1_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   #   Total ≈ 1-3 vs 19.8 for proper balance (6-20× incentive for leg use)
   cfg.rewards["pose"].weight = 2.0
 
-  # STABILITY-SHAPING SIGNALS — enabled now that the robot can stand (episode
-  # length 85, upright_gated kernel 0.8+). These were disabled at bootstrap
-  # to avoid value-function noise before any reward signal existed; they are
-  # now safe to turn on and directly address the observed failures:
+  # STABILITY-SHAPING SIGNALS — penalise torso-swing balance strategy.
   #
-  #   body_ang_vel (-0.05): penalises torso roll/pitch angular velocity.
-  #     TORSO ROTATION is the policy's current shortcut for balance — swinging
-  #     the upper body shifts angular momentum and momentarily rights the pelvis
-  #     faster than leg corrections can. body_ang_vel directly taxes this
-  #     strategy, making upper-body compensation more expensive than proper
-  #     ankle/knee corrections.
+  #   body_ang_vel (-0.5): penalises torso roll/pitch angular velocity, tracking
+  #     torso_link's own ang_vel_xy. TORSO ROTATION was the policy's preferred
+  #     balance shortcut — swinging the upper body shifts angular momentum and
+  #     momentarily rights the pelvis faster than leg corrections can. This
+  #     term taxes that strategy directly.
   #
-  #   action_rate_l2 (-0.01): penalises ||a_t - a_{t-1}||².
-  #     mean_action_acc reached 6.5 (near the clip_actions=3 ceiling per joint),
-  #     meaning the policy oscillates actions at maximum rate every step. This
-  #     produces jerky, non-generalising behaviour, worsening self_collision,
-  #     reducing hold_still, and causing the training reward to oscillate rather
-  #     than monotonically improve. The penalty forces the policy to commit to
-  #     smooth, sustained corrective actions instead.
+  #     CRITICAL HISTORY: in earlier runs this term had its KERNEL INVERTED in
+  #     rewards.py. The function returned exp(-xy²/std²) (1 at rest, 0 at chaos),
+  #     and with negative weight that meant "more spinning = less penalty",
+  #     i.e. the term ACTIVELY REWARDED the torso-swing failure mode it was
+  #     meant to suppress. The kernel is now (1 - exp(-xy²/std²)) (0 at rest,
+  #     saturates to 1 at chaos), and the weight magnitude is bumped from -0.05
+  #     to -0.5 so the corrected penalty is large enough (~0.4/step at 2 rad/s
+  #     torso swing) to outweigh whatever short-term upright_gated boost the
+  #     swing strategy buys.
   #
-  #   angular_momentum: keep at 0 until action_rate and body_ang_vel stabilise.
+  #   angular_momentum (-0.5): bounded penalty on whole-body angular momentum.
+  #     Had the same inverted-kernel bug in rewards.py. Now fixed and enabled —
+  #     gives an additional brake on any rotation-based balance strategy
+  #     (not just torso pitch/roll, but also waist twist / arm flailing).
+  #
+  #   action_rate_l2 (-0.01): penalises ||a_t - a_{t-1}||². Kept small; the
+  #     mean_action_acc=6.5 chaos pattern earlier in training was largely
+  #     driven by the same torso-swing strategy, so fixing the angular-velocity
+  #     penalties should reduce action chaos as a side effect.
   cfg.rewards["body_ang_vel"].params["std"] = 1.0
-  cfg.rewards["body_ang_vel"].weight = -0.05
+  cfg.rewards["body_ang_vel"].weight = -0.5
   cfg.rewards["angular_momentum"].params["std"] = 1.0
-  cfg.rewards["angular_momentum"].weight = 0.0
+  cfg.rewards["angular_momentum"].weight = -0.5
   cfg.rewards["action_rate_l2"].weight = -0.01
 
   # G1 standing height overrides -- terrain curriculum and fell_over
