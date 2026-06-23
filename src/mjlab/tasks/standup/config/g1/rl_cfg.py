@@ -36,7 +36,12 @@ def unitree_g1_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
   """Create RL runner configuration for Unitree G1 standup task."""
   return RslRlOnPolicyRunnerCfg(
     actor=RslRlModelCfg(
-      hidden_dims=(512, 256, 128),
+      # Smaller network to match the proven simple stay_stand recipe.
+      # 256-128-64 has enough capacity for a balance policy and trains
+      # noticeably faster than the 512-256-128 inherited from the
+      # locomotion fork. The bigger network was over-parameterised for
+      # this task and slowed gradient updates.
+      hidden_dims=(256, 128, 64),
       activation="elu",
       obs_normalization=True,
       distribution_cfg={
@@ -73,7 +78,7 @@ def unitree_g1_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
       },
     ),
     critic=RslRlModelCfg(
-      hidden_dims=(512, 256, 128),
+      hidden_dims=(256, 128, 64),
       activation="elu",
       obs_normalization=True,
     ),
@@ -104,15 +109,20 @@ def unitree_g1_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
     ),
     experiment_name="g1_staystand",
     save_interval=50,
-    num_steps_per_env=24,
+    # ROOT-CAUSE FIX. Previously this was 24 (= 0.48 s of rollout). With
+    # episodes terminating at ~74 control steps (~1.5 s), every rollout
+    # ended INSIDE a still-standing episode -- the fell_over termination
+    # never landed in the same buffer as the actions that led to it.
+    # GAE therefore computed advantages on episode fragments, the critic
+    # never saw the causal chain action -> fall, and the policy gradient
+    # was effectively noise. Train/mean_reward declined monotonically
+    # while Train/mean_episode_length sat fixed at ~74 steps.
+    #
+    # This exact pathology and its fix are documented in the simple
+    # stay_stand task's agent_context.txt (section 5, Diagnosis 3). The
+    # proven value of 128 (= 2.56 s) covers a full episode end-to-end so
+    # the critic can attribute terminations to the actions that caused
+    # them.
+    num_steps_per_env=128,
     max_iterations=30_000,
-    # Hard-clip sampled actions to +/-3.0 (i.e. ~3 sigma at init_std=0.1,
-    # but absolute -- even if policy std grows, sampled actions stay
-    # bounded). This is a safety net against the catastrophic feedback
-    # loop seen in the previous run: chaotic action samples -> chaotic
-    # joint targets -> chaotic angular velocities -> huge reward magnitudes
-    # -> value function divergence -> policy collapse. With actions
-    # clipped, the physics state can't blow up no matter what the policy
-    # does.
-    clip_actions=3.0,
   )
